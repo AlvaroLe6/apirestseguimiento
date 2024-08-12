@@ -3,14 +3,16 @@ var mysql = require('mysql');
 var cors = require('cors');
 var multer = require('multer');
 var path = require('path');
-var fileUpload = require('express-fileupload');
+var WebSocket = require('ws');
+
+//var fileUpload = require('express-fileupload');
 
 
 
 var app = express();
 app.use(express.json());
 app.use(cors());
-app.use(fileUpload());
+//app.use(fileUpload());
 
 
 //  Especiica el origen exacto (recomendado para producción)
@@ -28,6 +30,19 @@ var conexion = mysql.createConnection({
     password:'',
     database:'seguimiento_db'
 });
+
+
+const wss = new WebSocket.Server({ port: 8080 });
+wss.on('connection', ws => {
+    ws.on('message', message => {
+      // Cuando se recibe un mensaje, reenviar a todos los clientes conectados
+      wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(message);
+        }
+      });
+    });
+  });
 
 // probamos la conexion
 conexion.connect(function(error){
@@ -55,6 +70,104 @@ app.get('/api/persona',(req,res) =>{
     })
 })
 
+// mostrar todos las programas
+app.get('/api/programas',(req,res) =>{
+    conexion.query('SELECT * FROM seguimiento_db.programa;', (error, filas)=>{
+        if(error){
+            throw error;
+        }else{
+            res.send(filas);
+        }
+    })
+})
+
+// Numero de inscritos por programa
+app.get('/api/inscritos_por_programa', (req, res) => {
+    const query = `
+       SELECT 
+            cod_programa, 
+            COUNT(*) as num_inscritos 
+        FROM 
+            seguimiento_db.inscripciones_seg
+        GROUP BY 
+            cod_programa
+    `;
+    conexion.query(query, (error, results) => {
+        if (error) {
+            console.error('Error al obtener el número de inscritos:', error);
+            return res.status(500).send('Error interno del servidor');
+        }
+        res.send(results);
+    });
+});
+
+// Muestra todas las inscripciones por programa con detalles de persona
+app.get('/api/inscripciones_por_programa', (req, res) => {
+    const codPrograma = req.query.Cod_Programa;
+    if (!codPrograma) {
+        return res.status(400).send('Falta el parámetro Cod_Programa');
+    }
+    const sql = `
+    SELECT 
+            e.carnet,
+            e.expedicion,
+            e.nombres,
+            e.ap_paterno,
+            e.ap_materno,
+            e.celular,
+            e.correo,
+            e.genero,
+            e.univ_titulacion,
+            e.preofesion,
+            e.fecha_n,
+            e.edad,
+            e.cuidad_rec,
+            e.asesor,
+            e.modulo1,
+            e.modulo2,
+            e.modulo3,
+            e.modulo4,
+            e.modulo5,
+            e.modulo6,
+            e.notas_finales,
+            e.estado,
+            e.nivelacion,
+            e.observaciones,
+            e.titulo_academico,
+            e.titulo_prov,
+            e.cedula_identidad,
+            e.certificado_nac,
+            e.titulo_academico_leg,
+            e.cedula_identidad_leg,
+            e.certificado_nac_or,
+            e.fotos,
+            e.elab_monografia,
+            e.monografia_rec,
+            e.tramite,
+            e.titulo_prov_lega,
+            pg.Nombre,
+            pg.version
+            
+    FROM 
+        seguimiento_db.estudiantes_n e
+    JOIN 
+        seguimiento_db.inscripciones_seg ins ON e.cod_estudianteN = ins.cod_estudianteN
+    JOIN 
+        seguimiento_db.programa pg ON ins.cod_programa = pg.Cod_Programa
+
+         where pg.Cod_Programa = ?;
+    `;
+    conexion.query(sql, [codPrograma], (error, filas) => { // Pasar codPrograma como parámetro
+
+        if (error) {
+            console.error('Error al consultar la base de datos:', error);
+            return res.status(500).send('Error interno del servidor');
+        } else {
+            res.send(filas);
+        }
+    });
+});
+
 
 // mostrar solo una persona por el número de documento
 app.get('/api/buscar-estudiante/:num_doc',(req,res) =>{
@@ -69,6 +182,7 @@ app.get('/api/buscar-estudiante/:num_doc',(req,res) =>{
     tramite.Inicio_Tramite AS inicio_tramite,
     tramite.Estado AS estado,
     tramite.Etapa AS etapa_tramite,
+    tramite.Fase AS fase_tramite,
     programa.Nombre AS programa,
     programa.Tipo AS tipo,
     sede.Nombre AS sede,
@@ -218,23 +332,9 @@ app.post('/api/fondo_certificados', upload.single('fondo'), (req, res) => {
 });
 
 
-// Busca la portada del programa
+// Busca el ultimo fondo subido
 app.get('/api/fondo_certificados', (req, res) => {
-    const codPrograma = 2;
-    const sql = `SELECT 
-                p.Nombre,
-                fp.*
-                FROM 
-                marketing_db.programas p
-                JOIN 
-                    marketing_db.fondo_programa fp
-                ON 
-                    p.Cod_Fondo_P = fp.Cod_Fondo_P
-                WHERE 
-                    p.Cod_Programa = ?
-                ORDER BY 
-                    fp.Cod_Fondo_P DESC
-                LIMIT 1;`;
+    const sql = 'SELECT * FROM seguimiento_db.fondo_certificados ORDER BY Cod_fondo_C DESC LIMIT 1';
     conexion.query(sql, (error, result) => {
         if (error) {
             console.error('Error al consultar la base de datos:', error);
@@ -249,22 +349,11 @@ app.get('/api/fondo_certificados', (req, res) => {
 });
 
 // Insertar los datos del certificado en la base de datos y actualiza la tabla inscripcion
-app.post('/api/certificado_conclusion', (req, res) => {
+app.post('/api/certificado_conclusion',upload.single('file'), (req, res) => {
     const { Cod_Estudiante, Estudiante, CargaHoraria } = req.body;
     const FechaGeneracion = new Date();
 
-    if (!req.files || !req.files.file) {
-        return res.status(400).send('No se subió el archivo PDF');
-    }
-    const ArchivoCertificado = req.files.file;
-    const archivoPath = `uploads/${ArchivoCertificado.name}`;
-
-// Mueve el archivo a la carpeta de uploads
-    ArchivoCertificado.mv(archivoPath, (err) => {
-        if (err) {
-            console.error('Error al mover el archivo:', err);
-            return res.status(500).send('Error al mover el archivo');
-        }
+    const archivoPath = `uploads/${req.file.filename}`;
 
         const sqlInsertCertificado = `
             INSERT INTO seguimiento_db.certificado_conclusion 
@@ -290,9 +379,76 @@ app.post('/api/certificado_conclusion', (req, res) => {
                     console.error('Error al actualizar la inscripción:', error);
                     return res.status(500).send('Error al actualizar la inscripción');
                 }
+                  // Enviar mensaje a todos los clientes WebSocket
+                    wss.clients.forEach(client => {
+                        if (client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({ Cod_Estudiante }));
+                        }
+                    });
                 res.status(201).send({ message: 'Certificado insertado y inscripción actualizada correctamente', id: Cod_Certificado_C });
             });
         });
+});
+
+// mostrar los estudiantes con inscripcion que tienen un certificado de conclusion asignado.
+app.get('/api/buscar-estudiante-certificado-conclusion',(req,res) =>{
+    const query = `
+    SELECT 
+    estudiante.Cod_Estudiante,
+    estudiante.Carnet,
+    estudiante.Nombre,
+    estudiante.Apellido,
+    inscripcion.Cod_Inscripcion,
+    inscripcion.Cod_Programa,
+    inscripcion.fechaInscripcion,
+    certificado_conclusion.Cod_Certificado_C,
+    certificado_conclusion.Estudiante AS Estudiante_Certificado,
+    certificado_conclusion.FechaGeneracion,
+    certificado_conclusion.ArchivoCertificado,
+    certificado_conclusion.CargaHoraria
+FROM 
+    seguimiento_db.estudiante AS estudiante
+JOIN 
+    seguimiento_db.inscripcion AS inscripcion ON estudiante.Cod_Estudiante = inscripcion.Cod_Estudiante
+JOIN 
+    seguimiento_db.certificado_conclusion AS certificado_conclusion ON inscripcion.Cod_Certificado_C = certificado_conclusion.Cod_Certificado_C
+    WHERE 
+    inscripcion.Cod_Certificado_C IS NOT NULL;
+    `;
+        conexion.query(query, (error, resultados)=>{
+        if (error) {
+            console.error('Error al consultar la base de datos:', error);
+            return res.status(500).send('Error interno del servidor');
+        }
+
+        if (resultados.length > 0) {
+            res.send(resultados);
+        } else {
+            res.status(404).send('Certificados con inscripcion no encontrados');
+        }
+    })
+})
+
+// mostrar si se genero  certificado de un estudiante
+app.get('/api/verificar-certificado-conclusion/:cod_estudiante', (req, res) => {
+    const codEstudiante = req.params.cod_estudiante;
+    const query = `
+        SELECT Cod_Certificado_C 
+        FROM seguimiento_db.inscripcion 
+        WHERE Cod_Estudiante = ? AND Cod_Certificado_C IS NOT NULL
+    `;
+
+    conexion.query(query, [codEstudiante], (error, results) => {
+        if (error) {
+            console.error('Error al verificar el certificado:', error);
+            return res.status(500).send('Error al verificar el certificado');
+        }
+
+        if (results.length > 0) {
+            res.send({ certificadoGenerado: true });
+        } else {
+            res.send({ certificadoGenerado: false });
+        }
     });
 });
 
